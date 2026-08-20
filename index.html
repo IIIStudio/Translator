@@ -283,6 +283,24 @@ function splitKeep(text) {
   return segs;
 }
 
+const isContentSeg = s => !!s.trim() && !/^[,，.。!！?？;；:\s]+$/.test(s);
+
+// 全角逗号/句号统一为半角（英文正文使用半角标点）
+function normPunct(s) {
+  return s.replace(/，/g, ',').replace(/。/g, '.');
+}
+
+// 编辑弹窗提交时用：换行与标点都作为分段点
+function splitForEdit(text) {
+  const segs = [];
+  text.split(/(\n+)/).forEach(part => {
+    if (!part) return;
+    if (part.includes('\n')) segs.push(part);
+    else segs.push(...splitKeep(part));
+  });
+  return segs;
+}
+
 async function translateOne(sentence, pair) {
   const q = sentence.replace(/[,，.。]\s*$/, '');
   const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=' + (pair || 'en|zh');
@@ -391,6 +409,9 @@ async function translate() {
   editor.querySelectorAll('ruby').forEach(ruby => {
     const rt = ruby.querySelector('rt');
     if (!rt && ruby.innerText.trim()) {
+      ruby.childNodes.forEach(n => {
+        if (n.nodeType === Node.TEXT_NODE) n.nodeValue = normPunct(n.nodeValue);
+      });
       jobs.push({ en: ruby.innerText, oldRt: null, ruby });
     }
   });
@@ -401,7 +422,7 @@ async function translate() {
   while (walker.nextNode()) textNodes.push(walker.currentNode);
   textNodes.forEach(node => {
     if (node.parentElement.closest('ruby')) return;
-    const segs = splitKeep(node.nodeValue);
+    const segs = splitKeep(normPunct(node.nodeValue));
     if (segs.length < 2 && !segs[0].trim()) return;
     if (!segs.some(s => s.trim())) return;
     wrapJobs.push({ node, segs });
@@ -416,17 +437,20 @@ async function translate() {
 
   wrapJobs.forEach(({ node, segs }) => {
     const frag = document.createDocumentFragment();
+    let needSpace = false;
     segs.forEach(s => {
-      if (!s.trim()) { frag.appendChild(document.createTextNode(s)); return; }
+      if (!s.trim()) { frag.appendChild(document.createTextNode(s)); needSpace = false; return; }
       const m = s.match(/^(\s*)([\s\S]*?)(\s*)$/);
-      if (m[1]) frag.appendChild(document.createTextNode(m[1]));
+      if (m[1]) { frag.appendChild(document.createTextNode(m[1])); needSpace = false; }
+      else if (needSpace) frag.appendChild(document.createTextNode(' '));
       const ruby = document.createElement('ruby');
       ruby.textContent = m[2];
       const rt = document.createElement('rt');
       rt.setAttribute('data-zh', '…');
       ruby.appendChild(rt);
       frag.appendChild(ruby);
-      if (m[3]) frag.appendChild(document.createTextNode(m[3]));
+      if (m[3]) { frag.appendChild(document.createTextNode(m[3])); needSpace = false; }
+      else needSpace = /[,.;:!?]$/.test(m[2]);
       jobs.push({ en: m[2], rt });
     });
     node.parentNode.replaceChild(frag, node);
@@ -521,6 +545,13 @@ async function commitRuby(ruby, raw, origText, origZh, suffix) {
     pushHistory();
     return;
   }
+  // 全角标点转半角；英文后紧跟中文时自动补一个逗号作为分段点
+  raw = normPunct(raw).replace(/([A-Za-z])(?=[\u3400-\u9fff\uf900-\ufaff])/g, '$1,');
+  const segs = splitForEdit(raw);
+  if (segs.filter(isContentSeg).length > 1) {
+    await commitSegments(ruby, segs, suffix);
+    return;
+  }
   const hasZh = /[\u3400-\u9fff\uf900-\ufaff]/.test(raw);
   let en = raw, zhInput = '';
   if (hasZh) {
@@ -537,7 +568,7 @@ async function commitRuby(ruby, raw, origText, origZh, suffix) {
     }
   }
   ruby.textContent = '';
-  ruby.appendChild(document.createTextNode(en + (suffix || '')));
+  ruby.appendChild(document.createTextNode(normPunct(en) + normPunct(suffix || '')));
   const rt = document.createElement('rt');
   ruby.appendChild(rt);
   if (zhInput) {
@@ -551,6 +582,63 @@ async function commitRuby(ruby, raw, origText, origZh, suffix) {
     }
   }
   focusAfter(ruby);
+  pushHistory();
+}
+
+async function commitSegments(ruby, segs, suffix) {
+  const anchor = ruby.nextSibling;
+  const frag = document.createDocumentFragment();
+  const jobs = [];
+  let lastIdx = -1;
+  segs.forEach((s, i) => { if (isContentSeg(s)) lastIdx = i; });
+
+  let needSpace = false;
+  segs.forEach((s, i) => {
+    if (!isContentSeg(s)) {
+      frag.appendChild(document.createTextNode(s));
+      needSpace = false;
+      return;
+    }
+    const m = s.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    if (m[1]) { frag.appendChild(document.createTextNode(m[1])); needSpace = false; }
+    else if (needSpace) frag.appendChild(document.createTextNode(' '));
+    const r = document.createElement('ruby');
+    let body = m[2];
+    if (i === lastIdx && !/[,，.。!！?？;；]\s*$/.test(body)) body += (suffix || '');
+    r.appendChild(document.createTextNode(body));
+    const rt = document.createElement('rt');
+    rt.setAttribute('data-zh', '…');
+    r.appendChild(rt);
+    frag.appendChild(r);
+    if (m[3]) { frag.appendChild(document.createTextNode(m[3])); needSpace = false; }
+    else needSpace = /[,.;:!?]$/.test(body);
+    jobs.push({ raw: body, rubyEl: r, rt });
+  });
+
+  ruby.parentNode.replaceChild(frag, ruby);
+
+  await runWithConcurrency(jobs, 4, async (j) => {
+    if (!j.rubyEl.isConnected) return;
+    try {
+      if (/[\u3400-\u9fff\uf900-\ufaff]/.test(j.raw)) {
+        const en = await translateOne(j.raw, 'zh|en');
+        const tail = (j.raw.match(/[\s,，.。!！?？]+$/) || [''])[0];
+        let text = normPunct(en);
+        if (tail && !/[,，.。!！?？]\s*$/.test(text)) text += tail;
+        j.rubyEl.textContent = '';
+        j.rubyEl.appendChild(document.createTextNode(text));
+        const nrt = document.createElement('rt');
+        nrt.setAttribute('data-zh', j.raw);
+        j.rubyEl.appendChild(nrt);
+      } else {
+        j.rt.setAttribute('data-zh', await translateOne(j.raw));
+      }
+    } catch (err) {
+      j.rt.setAttribute('data-zh', '翻译失败');
+    }
+  });
+
+  focusAfter(anchor);
   pushHistory();
 }
 
@@ -604,7 +692,8 @@ editBox.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    confirmEdit();
+    if (e.shiftKey) document.execCommand('insertLineBreak');
+    else confirmEdit();
   } else if (e.key === 'Escape') {
     e.preventDefault();
     closeEdit();
