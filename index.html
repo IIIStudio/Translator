@@ -77,6 +77,31 @@
     transition: color .15s;
   }
   #links a:hover { color: #3a56d4; }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(255,255,255,.55);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #overlay.show { display: flex; }
+  #edit-box {
+    width: 88%;
+    max-width: 760px;
+    min-height: 55vh;
+    font-size: 24px;
+    line-height: 1.9;
+    outline: none;
+    white-space: pre-wrap;
+    word-break: break-word;
+    caret-color: #3a56d4;
+    text-align: left;
+  }
 </style>
 </head>
 <body>
@@ -86,9 +111,12 @@
   <a href="https://cnb.cool/IIIStudio/Code/HTML/Translator" target="_blank">CNB</a>
 </div>
 
+<div id="overlay"><div id="edit-box" contenteditable="true" spellcheck="false"></div></div>
+
 <script>
 const editor = document.getElementById('editor');
 let busy = false;
+let editing = null; // 弹窗编辑中的 ruby 元素
 
 const ABBR = new Set([
   'mr','mrs','ms','dr','st','vs','etc','no','fig','approx','prof','sr','jr',
@@ -150,9 +178,9 @@ function splitKeep(text) {
   return segs;
 }
 
-async function translateOne(sentence) {
+async function translateOne(sentence, pair) {
   const q = sentence.replace(/[,，.。]\s*$/, '');
-  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=en|zh';
+  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=' + (pair || 'en|zh');
   const res = await fetch(url, { method: 'GET' });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const data = await res.json();
@@ -182,6 +210,7 @@ function saveCaret() {
   const sel = window.getSelection();
   if (!sel.rangeCount) return null;
   const r = sel.getRangeAt(0);
+  if (!editor.contains(r.startContainer)) return null;
   const pre = document.createRange();
   pre.selectNodeContents(editor);
   pre.setEnd(r.startContainer, r.startOffset);
@@ -209,6 +238,44 @@ function restoreCaret(offset) {
   range.collapse(false);
   sel.removeAllRanges();
   sel.addRange(range);
+}
+
+const MAX_HISTORY = 100;
+let history = [];
+let hIndex = -1;
+let histTimer = null;
+
+function pushHistory() {
+  clearTimeout(histTimer);
+  const snap = { html: editor.innerHTML, caret: saveCaret() };
+  if (history[hIndex] && history[hIndex].html === snap.html) return;
+  history = history.slice(0, hIndex + 1);
+  history.push(snap);
+  if (history.length > MAX_HISTORY) history.shift();
+  hIndex = history.length - 1;
+}
+
+function schedulePush() {
+  clearTimeout(histTimer);
+  histTimer = setTimeout(pushHistory, 400);
+}
+
+function undo() {
+  if (busy || editing || hIndex <= 0) return;
+  hIndex--;
+  const snap = history[hIndex];
+  editor.innerHTML = snap.html;
+  restoreCaret(snap.caret);
+  editor.focus();
+}
+
+function redo() {
+  if (busy || editing || hIndex >= history.length - 1) return;
+  hIndex++;
+  const snap = history[hIndex];
+  editor.innerHTML = snap.html;
+  restoreCaret(snap.caret);
+  editor.focus();
 }
 
 async function translate() {
@@ -280,10 +347,11 @@ async function translate() {
   editor.contentEditable = 'true';
   editor.focus();
   restoreCaret(caretOffset);
+  pushHistory();
 }
 
 const mo = new MutationObserver((mutations) => {
-  if (busy) return;
+  if (busy || editing) return;
   for (const m of mutations) {
     if (m.type !== 'characterData') continue;
     const parent = m.target.parentElement;
@@ -297,13 +365,171 @@ const mo = new MutationObserver((mutations) => {
 mo.observe(editor, { characterData: true, subtree: true });
 
 function reset() {
+  if (editing) closeEdit();
   editor.innerHTML = '';
   busy = false;
   editor.contentEditable = 'true';
   editor.focus();
+  pushHistory();
 }
 
+function rubyText(ruby) {
+  let s = '';
+  for (const n of ruby.childNodes) {
+    if (n.nodeType === Node.TEXT_NODE) s += n.nodeValue;
+  }
+  return s;
+}
+
+function focusAfter(node) {
+  if (editing) return;
+  editor.focus();
+  const sel = window.getSelection();
+  const range = document.createRange();
+  if (node && node.parentNode) {
+    range.setStartAfter(node);
+    range.collapse(true);
+  } else {
+    range.selectNodeContents(editor);
+    range.collapse(false);
+  }
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function restoreRuby(ruby, text, zh) {
+  ruby.textContent = '';
+  ruby.appendChild(document.createTextNode(text));
+  const rt = document.createElement('rt');
+  if (zh) rt.setAttribute('data-zh', zh);
+  ruby.appendChild(rt);
+}
+
+async function commitRuby(ruby, raw, origText, origZh, suffix) {
+  if (!raw) {
+    const anchor = ruby.nextSibling;
+    ruby.remove();
+    focusAfter(anchor);
+    pushHistory();
+    return;
+  }
+  const hasZh = /[\u3400-\u9fff\uf900-\ufaff]/.test(raw);
+  let en = raw, zhInput = '';
+  if (hasZh) {
+    try {
+      en = await translateOne(raw, 'zh|en');
+      zhInput = raw;
+    } catch (err) {
+      restoreRuby(ruby, origText, origZh);
+      const rt = ruby.querySelector('rt');
+      if (rt) rt.setAttribute('data-zh', '翻译失败');
+      focusAfter(ruby);
+      pushHistory();
+      return;
+    }
+  }
+  ruby.textContent = '';
+  ruby.appendChild(document.createTextNode(en + (suffix || '')));
+  const rt = document.createElement('rt');
+  ruby.appendChild(rt);
+  if (zhInput) {
+    rt.setAttribute('data-zh', zhInput);
+  } else {
+    rt.setAttribute('data-zh', '…');
+    try {
+      rt.setAttribute('data-zh', await translateOne(en, 'en|zh'));
+    } catch (err) {
+      rt.setAttribute('data-zh', '翻译失败');
+    }
+  }
+  focusAfter(ruby);
+  pushHistory();
+}
+
+const overlay = document.getElementById('overlay');
+const editBox = document.getElementById('edit-box');
+
+function openEdit(ruby) {
+  if (editing || busy) return;
+  editing = ruby;
+  editBox.textContent = rubyText(ruby).replace(/[\s,，.。]+$/, '');
+  overlay.classList.add('show');
+  editBox.focus();
+  const sel = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(editBox);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function closeEdit() {
+  overlay.classList.remove('show');
+  editBox.textContent = '';
+  editing = null;
+  editor.focus();
+}
+
+function confirmEdit() {
+  if (!editing) return;
+  const ruby = editing;
+  const raw = editBox.innerText.trim();
+  const origText = rubyText(ruby);
+  const m = origText.match(/[\s,，.。]+$/);
+  const suffix = m ? m[0] : '';
+  const rt = ruby.querySelector('rt');
+  const origZh = rt ? (rt.getAttribute('data-zh') || '') : '';
+  closeEdit();
+  commitRuby(ruby, raw, origText, origZh, suffix);
+}
+
+editor.addEventListener('dblclick', (e) => {
+  const ruby = e.target.closest && e.target.closest('ruby');
+  if (!ruby || busy || editing) return;
+  e.preventDefault();
+  openEdit(ruby);
+});
+
+editBox.addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    confirmEdit();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeEdit();
+  }
+});
+
+overlay.addEventListener('mousedown', (e) => {
+  if (e.target === overlay) {
+    e.preventDefault();
+    editBox.focus();
+  }
+});
+
+function pasteAsPlain(e) {
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+  if (text) document.execCommand('insertText', false, text);
+}
+editor.addEventListener('paste', pasteAsPlain);
+editBox.addEventListener('paste', pasteAsPlain);
+
+editor.addEventListener('input', schedulePush);
+
 editor.addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if (mod && (e.key === 'y' || e.key === 'Y')) {
+    e.preventDefault();
+    redo();
+    return;
+  }
   if (e.key === 'Enter') {
     e.preventDefault();
     if (e.shiftKey) {
@@ -318,6 +544,7 @@ editor.addEventListener('keydown', (e) => {
 });
 
 editor.focus();
+pushHistory();
 </script>
 </body>
 </html>
