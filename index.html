@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>翻译</title>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: #fff;
+    color: #111;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  body::before {
+    content: '';
+    flex: none;
+    max-height: 25vh;
+  }
+
+  #editor {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    width: 100%;
+    max-width: 760px;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding: 40px 32px;
+    outline: none;
+    font-size: 20px;
+    line-height: 2.1;
+    caret-color: #111;
+    white-space: pre-wrap;
+    word-break: break-word;
+    text-align: left;
+  }
+  #editor::-webkit-scrollbar { display: none; }
+  #editor:empty::before {
+    content: attr(data-placeholder);
+    color: #c4c4c4;
+  }
+
+  ruby {
+    ruby-align: start;
+    border-radius: 4px;
+    transition: background .12s;
+  }
+  rt {
+    ruby-position: under;
+    -webkit-ruby-position: after;
+    font-size: 13px;
+    color: #9a9a9a;
+    padding-top: 2px;
+    pointer-events: none;
+    user-select: none;
+  }
+  rt::after { content: attr(data-zh); }
+  ruby:hover { background: #eef3ff; }
+  ruby:hover rt { color: #3a56d4; }
+
+  #links {
+    position: fixed;
+    right: 14px;
+    bottom: 10px;
+    font-size: 12px;
+    user-select: none;
+  }
+  #links a {
+    color: #bbb;
+    text-decoration: none;
+    margin-left: 12px;
+    transition: color .15s;
+  }
+  #links a:hover { color: #3a56d4; }
+</style>
+</head>
+<body>
+<div id="editor" contenteditable="true" spellcheck="false" data-placeholder="输入英文，按回车翻译"></div>
+<div id="links">
+  <a href="https://github.com/IIIStudio/Translator" target="_blank">GitHub</a>
+  <a href="https://cnb.cool/IIIStudio/Code/HTML/Translator" target="_blank">CNB</a>
+</div>
+
+<script>
+const editor = document.getElementById('editor');
+let busy = false;
+
+const ABBR = new Set([
+  'mr','mrs','ms','dr','st','vs','etc','no','fig','approx','prof','sr','jr',
+  'inc','ltd','co','corp','dept','est','vol','pp','ed','rev','gen','gov','sen','rep',
+  'jan','feb','mar','apr','jun','jul','aug','sep','sept','oct','nov','dec',
+  'mon','tue','tues','wed','thu','thur','thurs','fri','sat','sun',
+  'e.g','i.e','a.m','p.m','u.s','u.k','u.n',
+]);
+const isDigit = c => !!c && c >= '0' && c <= '9';
+const isLetter = c => !!c && /[a-zA-Z]/.test(c);
+
+function splitKeep(text) {
+  const segs = [];
+  let last = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+
+    if (c === ',' || c === '，') {
+      if (c === ',' && isDigit(text[i - 1]) && isDigit(text[i + 1])) continue;
+      segs.push(text.slice(last, i + 1));
+      last = i + 1;
+      continue;
+    }
+
+    if (c === '。') {
+      segs.push(text.slice(last, i + 1));
+      last = i + 1;
+      continue;
+    }
+
+    if (c === '.') {
+      const next = text[i + 1];
+      const CLOSERS = '"\'’”)]}';
+      let end = i + 1;
+      while (end < text.length && CLOSERS.includes(text[end])) end++;
+      let j = i - 1;
+      while (j >= 0 && CLOSERS.includes(text[j])) j--;
+      const prevCh = j >= 0 ? text[j] : '';
+      const nextCh = text[end];
+
+      if (isDigit(prevCh) && isDigit(nextCh)) continue;
+      if (prevCh === '.' || nextCh === '.') continue;
+      if (isLetter(nextCh)) continue;
+
+      let k = j, word = '';
+      while (k >= 0 && (isLetter(text[k]) || text[k] === '.')) { word = text[k] + word; k--; }
+      if (word) {
+        if (word.includes('.')) continue;
+        if (word.length === 1) continue;
+        if (ABBR.has(word.toLowerCase())) continue;
+      }
+      segs.push(text.slice(last, end));
+      last = end;
+    }
+  }
+
+  if (last < text.length) segs.push(text.slice(last));
+  return segs;
+}
+
+async function translateOne(sentence) {
+  const q = sentence.replace(/[,，.。]\s*$/, '');
+  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=en|zh';
+  const res = await fetch(url, { method: 'GET' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  const t = data && data.responseData && data.responseData.translatedText
+    ? data.responseData.translatedText : '';
+  if (!t) throw new Error('空结果');
+  return t;
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  let idx = 0;
+  async function runner() {
+    while (true) {
+      const i = idx++;
+      if (i >= items.length) break;
+      await worker(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+}
+
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function saveCaret() {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return null;
+  const r = sel.getRangeAt(0);
+  const pre = document.createRange();
+  pre.selectNodeContents(editor);
+  pre.setEnd(r.startContainer, r.startOffset);
+  return pre.toString().length;
+}
+
+function restoreCaret(offset) {
+  if (offset == null) return;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let node, acc = 0;
+  while ((node = walker.nextNode())) {
+    const len = node.nodeValue.length;
+    if (acc + len >= offset) {
+      range.setStart(node, offset - acc);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+    acc += len;
+  }
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+async function translate() {
+  if (busy) return;
+  busy = true;
+
+  const jobs = [];
+  editor.querySelectorAll('ruby').forEach(ruby => {
+    const rt = ruby.querySelector('rt');
+    if (!rt && ruby.innerText.trim()) {
+      jobs.push({ en: ruby.innerText, oldRt: null, ruby });
+    }
+  });
+
+  const wrapJobs = [];
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  textNodes.forEach(node => {
+    if (node.parentElement.closest('ruby')) return;
+    const segs = splitKeep(node.nodeValue);
+    if (segs.length < 2 && !segs[0].trim()) return;
+    if (!segs.some(s => s.trim())) return;
+    wrapJobs.push({ node, segs });
+  });
+
+  if (!jobs.length && !wrapJobs.length) { busy = false; return; }
+
+  const caretOffset = saveCaret();
+  editor.contentEditable = 'false';
+
+  wrapJobs.forEach(({ node, segs }) => {
+    const frag = document.createDocumentFragment();
+    segs.forEach(s => {
+      if (!s.trim()) { frag.appendChild(document.createTextNode(s)); return; }
+      const m = s.match(/^(\s*)([\s\S]*?)(\s*)$/);
+      if (m[1]) frag.appendChild(document.createTextNode(m[1]));
+      const ruby = document.createElement('ruby');
+      ruby.textContent = m[2];
+      const rt = document.createElement('rt');
+      rt.setAttribute('data-zh', '…');
+      ruby.appendChild(rt);
+      frag.appendChild(ruby);
+      if (m[3]) frag.appendChild(document.createTextNode(m[3]));
+      jobs.push({ en: m[2], rt });
+    });
+    node.parentNode.replaceChild(frag, node);
+  });
+
+  jobs.forEach(j => {
+    if (j.ruby && !j.rt) {
+      const rt = document.createElement('rt');
+      rt.setAttribute('data-zh', '…');
+      j.ruby.appendChild(rt);
+      j.rt = rt;
+    }
+  });
+
+  await runWithConcurrency(jobs, 4, async (j) => {
+    if (!j.rt.isConnected) return;
+    try {
+      j.rt.setAttribute('data-zh', await translateOne(j.en));
+    } catch (err) {
+      j.rt.setAttribute('data-zh', '翻译失败');
+    }
+  });
+
+  busy = false;
+  editor.contentEditable = 'true';
+  editor.focus();
+  restoreCaret(caretOffset);
+}
+
+const mo = new MutationObserver((mutations) => {
+  if (busy) return;
+  for (const m of mutations) {
+    if (m.type !== 'characterData') continue;
+    const parent = m.target.parentElement;
+    const ruby = parent && parent.closest('ruby');
+    if (ruby) {
+      const rt = ruby.querySelector('rt');
+      if (rt) rt.remove();
+    }
+  }
+});
+mo.observe(editor, { characterData: true, subtree: true });
+
+function reset() {
+  editor.innerHTML = '';
+  busy = false;
+  editor.contentEditable = 'true';
+  editor.focus();
+}
+
+editor.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) {
+      document.execCommand('insertLineBreak');
+    } else {
+      translate();
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    reset();
+  }
+});
+
+editor.focus();
+</script>
+</body>
+</html>
