@@ -182,6 +182,13 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  .history-item .h-old {
+    font-size: 12px;
+    color: #c4c4c4;
+    margin-top: 2px;
+    text-decoration: line-through;
+    text-decoration-color: #d9d9d9;
+  }
   .history-item .h-time {
     font-size: 11px;
     color: #bbb;
@@ -580,7 +587,7 @@ function confirmEdit() {
   const suffix = m ? m[0] : '';
   const rt = ruby.querySelector('rt');
   const origZh = rt ? (rt.getAttribute('data-zh') || '') : '';
-  if (raw) recordInput(raw, '修改');
+  if (raw) recordInput(raw, '修改', origText);
   else recordInput(origText, '删除');
   closeEdit();
   commitRuby(ruby, raw, origText, origZh, suffix);
@@ -621,14 +628,15 @@ function fmtTime(d) {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
-function recordInput(text, type) {
+function recordInput(text, type, old) {
   text = (text || '').trim();
   if (!text) return;
+  old = (old || '').trim();
   const top = inputHistory[0];
-  if (top && top.text === text && top.type === type) {
+  if (top && top.text === text && top.type === type && top.old === old) {
     top.time = new Date();
   } else {
-    inputHistory.unshift({ text, time: new Date(), type: type || '输入' });
+    inputHistory.unshift({ text, time: new Date(), type: type || '输入', old });
     if (inputHistory.length > 200) inputHistory.pop();
   }
   renderHistory();
@@ -649,6 +657,12 @@ function renderHistory() {
     const txt = document.createElement('div');
     txt.className = 'h-text';
     txt.textContent = h.text;
+    if (h.old && h.old !== h.text) {
+      const old = document.createElement('div');
+      old.className = 'h-old';
+      old.textContent = '原：' + h.old;
+      txt.appendChild(old);
+    }
     const time = document.createElement('div');
     time.className = 'h-time';
     time.textContent = fmtTime(h.time) + ' · ' + h.type + ' · 点击复制';
@@ -691,6 +705,13 @@ histBtn.addEventListener('click', () => {
   editor.focus();
 });
 histClose.addEventListener('click', () => histPanel.classList.remove('open'));
+
+// 点击面板以外的区域自动收回
+document.addEventListener('mousedown', (e) => {
+  if (!histPanel.classList.contains('open')) return;
+  if (histPanel.contains(e.target) || histBtn.contains(e.target)) return;
+  histPanel.classList.remove('open');
+});
 
 function pasteAsPlain(e) {
   e.preventDefault();
