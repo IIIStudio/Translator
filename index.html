@@ -102,6 +102,92 @@
     caret-color: #3a56d4;
     text-align: left;
   }
+
+  #history-btn {
+    position: fixed;
+    left: 14px;
+    top: 10px;
+    font-size: 12px;
+    color: #bbb;
+    background: none;
+    border: none;
+    padding: 4px 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: color .15s;
+    z-index: 20;
+    font-family: inherit;
+  }
+  #history-btn:hover { color: #3a56d4; }
+
+  #history-panel {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 320px;
+    max-width: 85vw;
+    background: #fff;
+    border-right: 1px solid #eee;
+    box-shadow: 8px 0 32px rgba(0,0,0,.06);
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+  }
+  #history-panel.open { transform: translateX(0); }
+  #history-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px 10px;
+    font-size: 14px;
+    color: #666;
+    border-bottom: 1px solid #f0f0f0;
+    flex: none;
+  }
+  #history-close {
+    cursor: pointer;
+    color: #bbb;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+  }
+  #history-close:hover { color: #3a56d4; }
+  #history-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+  .history-empty {
+    color: #c4c4c4;
+    font-size: 13px;
+    text-align: center;
+    padding: 32px 0;
+  }
+  .history-item {
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background .12s;
+  }
+  .history-item:hover { background: #f5f7ff; }
+  .history-item .h-text {
+    font-size: 14px;
+    line-height: 1.6;
+    color: #333;
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .history-item .h-time {
+    font-size: 11px;
+    color: #bbb;
+    margin-top: 4px;
+  }
+  .history-item .h-time.copied { color: #3a56d4; }
 </style>
 </head>
 <body>
@@ -113,10 +199,22 @@
 
 <div id="overlay"><div id="edit-box" contenteditable="true" spellcheck="false"></div></div>
 
+<button id="history-btn">历史</button>
+<aside id="history-panel">
+  <div id="history-head">
+    <span>历史记录</span>
+    <span id="history-close">×</span>
+  </div>
+  <div id="history-list"></div>
+</aside>
+
 <script>
 const editor = document.getElementById('editor');
 let busy = false;
 let editing = null; // 弹窗编辑中的 ruby 元素
+
+// 不持久化：防止浏览器会话恢复还原 contenteditable 内容
+editor.innerHTML = '';
 
 const ABBR = new Set([
   'mr','mrs','ms','dr','st','vs','etc','no','fig','approx','prof','sr','jr',
@@ -304,6 +402,8 @@ async function translate() {
 
   if (!jobs.length && !wrapJobs.length) { busy = false; return; }
 
+  recordInput(editor.innerText, '输入');
+
   const caretOffset = saveCaret();
   editor.contentEditable = 'false';
 
@@ -366,6 +466,7 @@ mo.observe(editor, { characterData: true, subtree: true });
 
 function reset() {
   if (editing) closeEdit();
+  recordInput(editor.innerText, '清空');
   editor.innerHTML = '';
   busy = false;
   editor.contentEditable = 'true';
@@ -479,6 +580,8 @@ function confirmEdit() {
   const suffix = m ? m[0] : '';
   const rt = ruby.querySelector('rt');
   const origZh = rt ? (rt.getAttribute('data-zh') || '') : '';
+  if (raw) recordInput(raw, '修改');
+  else recordInput(origText, '删除');
   closeEdit();
   commitRuby(ruby, raw, origText, origZh, suffix);
 }
@@ -491,7 +594,7 @@ editor.addEventListener('dblclick', (e) => {
 });
 
 editBox.addEventListener('keydown', (e) => {
-  if (e.isComposing || e.keyCode === 229) return;
+  if (e.isComposing) return;
   if (e.key === 'Enter') {
     e.preventDefault();
     confirmEdit();
@@ -508,6 +611,87 @@ overlay.addEventListener('mousedown', (e) => {
   }
 });
 
+const histBtn = document.getElementById('history-btn');
+const histPanel = document.getElementById('history-panel');
+const histClose = document.getElementById('history-close');
+const histList = document.getElementById('history-list');
+let inputHistory = []; // 仅内存，刷新即清空
+
+function fmtTime(d) {
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+function recordInput(text, type) {
+  text = (text || '').trim();
+  if (!text) return;
+  const top = inputHistory[0];
+  if (top && top.text === text && top.type === type) {
+    top.time = new Date();
+  } else {
+    inputHistory.unshift({ text, time: new Date(), type: type || '输入' });
+    if (inputHistory.length > 200) inputHistory.pop();
+  }
+  renderHistory();
+}
+
+function renderHistory() {
+  histList.innerHTML = '';
+  if (!inputHistory.length) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = '暂无历史记录';
+    histList.appendChild(empty);
+    return;
+  }
+  inputHistory.forEach(h => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    const txt = document.createElement('div');
+    txt.className = 'h-text';
+    txt.textContent = h.text;
+    const time = document.createElement('div');
+    time.className = 'h-time';
+    time.textContent = fmtTime(h.time) + ' · ' + h.type + ' · 点击复制';
+    item.appendChild(txt);
+    item.appendChild(time);
+    item.addEventListener('click', () => {
+      copyText(h.text, () => {
+        time.textContent = fmtTime(h.time) + ' · 已复制';
+        time.classList.add('copied');
+        setTimeout(() => {
+          time.textContent = fmtTime(h.time) + ' · ' + h.type + ' · 点击复制';
+          time.classList.remove('copied');
+        }, 1200);
+      });
+    });
+    histList.appendChild(item);
+  });
+}
+
+function copyText(text, done) {
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done && done(); } catch (err) {}
+    ta.remove();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => done && done()).catch(fallback);
+  } else {
+    fallback();
+  }
+}
+
+histBtn.addEventListener('click', () => {
+  histPanel.classList.toggle('open');
+  editor.focus();
+});
+histClose.addEventListener('click', () => histPanel.classList.remove('open'));
+
 function pasteAsPlain(e) {
   e.preventDefault();
   const text = (e.clipboardData || window.clipboardData).getData('text/plain');
@@ -519,6 +703,7 @@ editBox.addEventListener('paste', pasteAsPlain);
 editor.addEventListener('input', schedulePush);
 
 editor.addEventListener('keydown', (e) => {
+  if (e.isComposing) return;
   const mod = e.ctrlKey || e.metaKey;
   if (mod && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
@@ -539,12 +724,19 @@ editor.addEventListener('keydown', (e) => {
     }
   } else if (e.key === 'Escape') {
     e.preventDefault();
-    reset();
+    if (histPanel.classList.contains('open')) histPanel.classList.remove('open');
+    else reset();
   }
 });
 
 editor.focus();
 pushHistory();
+renderHistory();
+
+// 后退/前进（bfcache）恢复页面时也清空
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) reset();
+});
 </script>
 </body>
 </html>
