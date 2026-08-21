@@ -198,7 +198,7 @@
 </style>
 </head>
 <body>
-<div id="editor" contenteditable="true" spellcheck="false" data-placeholder="输入英文，按回车翻译"></div>
+<div id="editor" contenteditable="true" spellcheck="false" data-placeholder="输入英文或中文，按回车翻译"></div>
 <div id="links">
   <a href="https://github.com/IIIStudio/Translator" target="_blank">GitHub</a>
   <a href="https://cnb.cool/IIIStudio/Code/HTML/Translator" target="_blank">CNB</a>
@@ -467,8 +467,23 @@ async function translate() {
 
   await runWithConcurrency(jobs, 4, async (j) => {
     if (!j.rt.isConnected) return;
+    const hasZh = /[\u3400-\u9fff\uf900-\ufaff]/.test(j.en);
     try {
-      j.rt.setAttribute('data-zh', await translateOne(j.en));
+      if (hasZh) {
+        // 中文输入：正文替换为英文翻译，中文保留为注音
+        const en = await translateOne(j.en, 'zh|en');
+        const ruby = j.rt.closest('ruby');
+        if (ruby) {
+          ruby.childNodes.forEach(n => {
+            if (n.nodeType === Node.TEXT_NODE) ruby.removeChild(n);
+          });
+          ruby.insertBefore(document.createTextNode(normPunct(en)), j.rt);
+          j.rt.setAttribute('data-zh', j.en);
+        }
+      } else {
+        // 英文输入：保持英文正文，下方显示中文注释
+        j.rt.setAttribute('data-zh', await translateOne(j.en, 'en|zh'));
+      }
     } catch (err) {
       j.rt.setAttribute('data-zh', '翻译失败');
     }
